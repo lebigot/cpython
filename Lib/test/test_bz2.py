@@ -6,11 +6,13 @@ from io import BytesIO, DEFAULT_BUFFER_SIZE
 import os
 import pickle
 import glob
+import tempfile
 import pathlib
 import random
 import shutil
 import subprocess
 import threading
+from test.support import threading_helper
 from test.support import unlink
 import _compression
 import sys
@@ -76,11 +78,11 @@ class BaseTest(unittest.TestCase):
     BIG_DATA = bz2.compress(BIG_TEXT, compresslevel=1)
 
     def setUp(self):
-        self.filename = support.TESTFN
+        fd, self.filename = tempfile.mkstemp()
+        os.close(fd)
 
     def tearDown(self):
-        if os.path.isfile(self.filename):
-            os.unlink(self.filename)
+        unlink(self.filename)
 
 
 class BZ2FileTest(BaseTest):
@@ -98,6 +100,9 @@ class BZ2FileTest(BaseTest):
         self.assertRaises(ValueError, BZ2File, os.devnull, "rbt")
         self.assertRaises(ValueError, BZ2File, os.devnull, compresslevel=0)
         self.assertRaises(ValueError, BZ2File, os.devnull, compresslevel=10)
+
+        # compresslevel is keyword-only
+        self.assertRaises(TypeError, BZ2File, os.devnull, "r", 3)
 
     def testRead(self):
         self.createTempFile()
@@ -498,7 +503,7 @@ class BZ2FileTest(BaseTest):
                 for i in range(5):
                     f.write(data)
             threads = [threading.Thread(target=comp) for i in range(nthreads)]
-            with support.start_threads(threads):
+            with threading_helper.start_threads(threads):
                 pass
 
     def testMixedIterationAndReads(self):
@@ -642,6 +647,7 @@ class BZ2CompressorTest(BaseTest):
         data += bz2c.flush()
         self.assertEqual(ext_decompress(data), self.TEXT)
 
+    @support.skip_if_pgo_task
     @bigmemtest(size=_4G + 100, memuse=2)
     def testCompress4G(self, size):
         # "Test BZ2Compressor.compress()/flush() with >4GiB input"
@@ -700,11 +706,12 @@ class BZ2DecompressorTest(BaseTest):
         self.assertRaises(EOFError, bz2d.decompress, b"anything")
         self.assertRaises(EOFError, bz2d.decompress, b"")
 
+    @support.skip_if_pgo_task
     @bigmemtest(size=_4G + 100, memuse=3.3)
     def testDecompress4G(self, size):
         # "Test BZ2Decompressor.decompress() with >4GiB input"
         blocksize = 10 * 1024 * 1024
-        block = random.getrandbits(blocksize * 8).to_bytes(blocksize, 'little')
+        block = random.randbytes(blocksize)
         try:
             data = block * (size // blocksize + 1)
             compressed = bz2.compress(data)

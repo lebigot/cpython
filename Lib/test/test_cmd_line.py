@@ -5,8 +5,8 @@
 import os
 import subprocess
 import sys
-import sysconfig
 import tempfile
+import textwrap
 import unittest
 from test import support
 from test.support.script_helper import (
@@ -220,6 +220,21 @@ class CmdLineTest(unittest.TestCase):
         )
         check_output(text)
 
+    def test_non_interactive_output_buffering(self):
+        code = textwrap.dedent("""
+            import sys
+            out = sys.stdout
+            print(out.isatty(), out.write_through, out.line_buffering)
+            err = sys.stderr
+            print(err.isatty(), err.write_through, err.line_buffering)
+        """)
+        args = [sys.executable, '-c', code]
+        proc = subprocess.run(args, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, check=True)
+        self.assertEqual(proc.stdout,
+                         'False False False\n'
+                         'False False True\n')
+
     def test_unbuffered_output(self):
         # Test expected operation of the '-u' switch
         for stream in ('stdout', 'stderr'):
@@ -333,10 +348,10 @@ class CmdLineTest(unittest.TestCase):
 
         if sys.platform == 'win32':
             self.assertEqual(b'1\r\n2\r\n', out)
-            self.assertEqual(b'3\r\n4', err)
+            self.assertEqual(b'3\r\n4\r\n', err)
         else:
             self.assertEqual(b'1\n2\n', out)
-            self.assertEqual(b'3\n4', err)
+            self.assertEqual(b'3\n4\n', err)
 
     def test_unmached_quote(self):
         # Issue #10206: python program starting with unmatched quote
@@ -369,6 +384,8 @@ class CmdLineTest(unittest.TestCase):
     # Issue #7111: Python should work without standard streams
 
     @unittest.skipIf(os.name != 'posix', "test needs POSIX semantics")
+    @unittest.skipIf(sys.platform == "vxworks",
+                         "test needs preexec support in subprocess.Popen")
     def _test_no_stdio(self, streams):
         code = """if 1:
             import os, sys
@@ -390,7 +407,7 @@ class CmdLineTest(unittest.TestCase):
             stderr=subprocess.PIPE,
             preexec_fn=preexec)
         out, err = p.communicate()
-        self.assertEqual(support.strip_python_stderr(err), b'')
+        self.assertEqual(err, b'')
         self.assertEqual(p.returncode, 42)
 
     def test_no_stdin(self):
@@ -507,25 +524,51 @@ class CmdLineTest(unittest.TestCase):
                 PYTHONDONTWRITEBYTECODE=value,
                 PYTHONVERBOSE=value,
             )
+            dont_write_bytecode = int(bool(value))
             code = (
                 "import sys; "
                 "sys.stderr.write(str(sys.flags)); "
                 f"""sys.exit(not (
                     sys.flags.debug == sys.flags.optimize ==
-                    sys.flags.dont_write_bytecode == sys.flags.verbose ==
+                    sys.flags.verbose ==
                     {expected}
+                    and sys.flags.dont_write_bytecode == {dont_write_bytecode}
                 ))"""
             )
             with self.subTest(envar_value=value):
                 assert_python_ok('-c', code, **env_vars)
 
+    def test_set_pycache_prefix(self):
+        # sys.pycache_prefix can be set from either -X pycache_prefix or
+        # PYTHONPYCACHEPREFIX env var, with the former taking precedence.
+        NO_VALUE = object()  # `-X pycache_prefix` with no `=PATH`
+        cases = [
+            # (PYTHONPYCACHEPREFIX, -X pycache_prefix, sys.pycache_prefix)
+            (None, None, None),
+            ('foo', None, 'foo'),
+            (None, 'bar', 'bar'),
+            ('foo', 'bar', 'bar'),
+            ('foo', '', None),
+            ('foo', NO_VALUE, None),
+        ]
+        for envval, opt, expected in cases:
+            exp_clause = "is None" if expected is None else f'== "{expected}"'
+            code = f"import sys; sys.exit(not sys.pycache_prefix {exp_clause})"
+            args = ['-c', code]
+            env = {} if envval is None else {'PYTHONPYCACHEPREFIX': envval}
+            if opt is NO_VALUE:
+                args[:0] = ['-X', 'pycache_prefix']
+            elif opt is not None:
+                args[:0] = ['-X', f'pycache_prefix={opt}']
+            with self.subTest(envval=envval, opt=opt):
+                with support.temp_cwd():
+                    assert_python_ok(*args, **env)
+
     def run_xdev(self, *args, check_exitcode=True, xdev=True):
         env = dict(os.environ)
         env.pop('PYTHONWARNINGS', None)
         env.pop('PYTHONDEVMODE', None)
-        # Force malloc() to disable the debug hooks which are enabled
-        # by default for Python compiled in debug mode
-        env['PYTHONMALLOC'] = 'malloc'
+        env.pop('PYTHONMALLOC', None)
 
         if xdev:
             args = (sys.executable, '-X', 'dev', *args)
@@ -712,6 +755,17 @@ class CmdLineTest(unittest.TestCase):
                               executable=executable)
         self.assertEqual(proc.returncode, 0, proc)
         self.assertEqual(proc.stdout.strip(), b'0')
+
+    def test_parsing_error(self):
+        args = [sys.executable, '-I', '--unknown-option']
+        proc = subprocess.run(args,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              text=True)
+        err_msg = "unknown option --unknown-option\nusage: "
+        self.assertTrue(proc.stderr.startswith(err_msg), proc.stderr)
+        self.assertNotEqual(proc.returncode, 0)
+
 
 @unittest.skipIf(interpreter_requires_environment(),
                  'Cannot run -I tests when PYTHON env vars are required.')
